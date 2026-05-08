@@ -4,3 +4,4 @@
 *.swp
 tags
 dunning/docs/current
+.ruff_cache/
