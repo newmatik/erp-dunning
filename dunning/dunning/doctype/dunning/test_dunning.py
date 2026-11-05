@@ -18,6 +18,7 @@ def _load_module():
 		frappe_stub = types.ModuleType("frappe")
 		frappe_stub.whitelist = lambda *a, **k: (lambda fn: fn)
 		frappe_stub._ = lambda s: s
+		frappe_stub.PermissionError = type("PermissionError", (Exception,), {})
 		model = types.ModuleType("frappe.model")
 		document = types.ModuleType("frappe.model.document")
 		document.Document = type("Document", (), {})
@@ -71,12 +72,24 @@ class TestSendPaymentReminderEmail(unittest.TestCase):
 		}
 		patches = {
 			"db": mock.DEFAULT, "attach_print": mock.DEFAULT, "sendmail": mock.DEFAULT,
-			"msgprint": mock.DEFAULT, "throw": mock.DEFAULT,
+			"msgprint": mock.DEFAULT, "throw": mock.DEFAULT, "get_doc": mock.DEFAULT,
 		}
 		with mock.patch.multiple(dunning.frappe, create=True, new_callable=mock.MagicMock, **patches) as m:
 			m["db"].get_value.side_effect = lambda doctype, name, *a, **k: values[(doctype, name)]
 			m["attach_print"].side_effect = lambda doctype, name, **k: {"fname": name}
 			m["throw"].side_effect = _Thrown
+			m["docs"] = []
+
+			def get_doc(doctype, name, *args, **kwargs):
+				doc = mock.Mock()
+				doc.doctype = doctype
+				doc.name = name
+				if doctype == "Dunning":
+					doc.sales_invoice = "SINV-1"
+				m["docs"].append(doc)
+				return doc
+
+			m["get_doc"].side_effect = get_doc
 			try:
 				dunning.send_payment_reminder_email("SINV-1", "DUN-1")
 			except _Thrown:
@@ -103,6 +116,105 @@ class TestSendPaymentReminderEmail(unittest.TestCase):
 		self.assertTrue(m.get("raised"), "frappe.throw must propagate")
 		m["sendmail"].assert_not_called()
 		m["throw"].assert_called_once()
+
+	def test_requires_read_on_dunning_and_linked_invoice(self):
+		m = self._run("en", "a@example.com")
+		self.assertEqual(
+			[(call.args[0], call.args[1]) for call in m["get_doc"].call_args_list],
+			[("Dunning", "DUN-1"), ("Sales Invoice", "SINV-1")],
+		)
+		for doc in m["docs"]:
+			doc.check_permission.assert_called_once_with("read")
+
+	def test_missing_dunning_sends_nothing(self):
+		m = self._call(get_doc=mock.Mock(side_effect=_Missing("gone")))
+		self.assertIs(m["error"], _Missing)
+		m["sendmail"].assert_not_called()
+		m["attach_print"].assert_not_called()
+		m["db"].get_value.assert_not_called()
+
+	def test_blank_dunning_name_sends_nothing(self):
+		m = self._call(doc_name="")
+		self.assertIs(m["error"], _Thrown)
+		m["get_doc"].assert_not_called()
+		m["sendmail"].assert_not_called()
+		self.assertIs(m["throw"].call_args[0][1], dunning.frappe.PermissionError)
+
+	def test_unreadable_dunning_sends_nothing(self):
+		def get_doc(doctype, name, *args, **kwargs):
+			if doctype != "Dunning":
+				raise AssertionError(doctype)
+			doc = mock.Mock()
+			doc.sales_invoice = "SINV-1"
+			doc.check_permission.side_effect = _Denied("no")
+			return doc
+
+		m = self._call(get_doc=get_doc)
+		self.assertIs(m["error"], _Denied)
+		m["sendmail"].assert_not_called()
+		m["attach_print"].assert_not_called()
+		m["db"].get_value.assert_not_called()
+
+	def test_invoice_not_linked_to_dunning_sends_nothing(self):
+		def get_doc(doctype, name, *args, **kwargs):
+			if doctype != "Dunning":
+				raise AssertionError(doctype)
+			doc = mock.Mock()
+			doc.sales_invoice = "SINV-OTHER"
+			return doc
+
+		m = self._call(get_doc=get_doc, sales_invoice="SINV-1")
+		self.assertIs(m["error"], _Thrown)
+		m["get_doc"].assert_called_once_with("Dunning", "DUN-1")
+		m["sendmail"].assert_not_called()
+		m["attach_print"].assert_not_called()
+		m["db"].get_value.assert_not_called()
+		self.assertIs(m["throw"].call_args[0][1], dunning.frappe.PermissionError)
+
+	def test_unreadable_invoice_sends_nothing(self):
+		def get_doc(doctype, name, *args, **kwargs):
+			doc = mock.Mock()
+			if doctype == "Dunning":
+				doc.sales_invoice = "SINV-1"
+			elif doctype == "Sales Invoice":
+				doc.check_permission.side_effect = _Denied("no")
+			else:
+				raise AssertionError(doctype)
+			return doc
+
+		m = self._call(get_doc=get_doc)
+		self.assertIs(m["error"], _Denied)
+		self.assertEqual(
+			[(call.args[0], call.args[1]) for call in m["get_doc"].call_args_list],
+			[("Dunning", "DUN-1"), ("Sales Invoice", "SINV-1")],
+		)
+		m["sendmail"].assert_not_called()
+		m["attach_print"].assert_not_called()
+		m["db"].get_value.assert_not_called()
+
+	def _call(self, sales_invoice="SINV-1", doc_name="DUN-1", get_doc=None):
+		patches = {
+			"db": mock.DEFAULT, "attach_print": mock.DEFAULT, "sendmail": mock.DEFAULT,
+			"msgprint": mock.DEFAULT, "throw": mock.DEFAULT, "get_doc": mock.DEFAULT,
+		}
+		with mock.patch.multiple(dunning.frappe, create=True, new_callable=mock.MagicMock, **patches) as m:
+			m["throw"].side_effect = _Thrown
+			if get_doc is not None:
+				m["get_doc"].side_effect = get_doc
+			m["error"] = None
+			try:
+				dunning.send_payment_reminder_email(sales_invoice, doc_name)
+			except Exception as exc:
+				m["error"] = type(exc)
+			return m
+
+
+class _Missing(Exception):
+	"""Stand in for a missing Dunning."""
+
+
+class _Denied(Exception):
+	"""Stand in for a refused read permission."""
 
 
 if __name__ == "__main__":
