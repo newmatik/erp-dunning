@@ -33,6 +33,18 @@ def get_text_block(dunning_type, language, doc):
 
 @frappe.whitelist()
 def send_payment_reminder_email(sales_invoice, doc_name):
+	"""Send the reminder only when the caller may read this Dunning and its invoice."""
+	if not isinstance(doc_name, string_types) or not doc_name:
+		frappe.throw(_("Not permitted"), frappe.PermissionError)
+
+	dunning = frappe.get_doc("Dunning", doc_name)
+	dunning.check_permission("read")
+	if not dunning.sales_invoice or dunning.sales_invoice != sales_invoice:
+		frappe.throw(_("Not permitted"), frappe.PermissionError)
+
+	invoice = frappe.get_doc("Sales Invoice", dunning.sales_invoice)
+	invoice.check_permission("read")
+
 	si = frappe.db.get_value("Sales Invoice", sales_invoice, ["customer", "contact_person"], as_dict=1)
 	lang = frappe.db.get_value("Customer", si.customer, "language")
 	if lang == 'de':
