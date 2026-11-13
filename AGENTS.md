@@ -1,8 +1,14 @@
 # Dunning
 
-This Frappe app owns the Dunning DocType, reminder text blocks and payment
+This Frappe app owned the Dunning DocType, reminder text blocks and payment
 reminder email templates. Read `README.md` for installation and offline tests.
 
+- The app is retired: Newmatik's ERP uses ERPNext core Dunning since the v16
+  migration and this app is not installed there. `main` has no deployment
+  target, so do not report a change here as deployed or as a production fix.
+  Changes to dunning behaviour in production belong in the ERP app, not here.
+- Keep the branches `version-14` and `version-16`; the migration runbook
+  references them.
 - Preserve the existing DocType, hook and whitelisted-method contracts.
 - Payment reminders send real email and attach invoice documents. Never invoke
   live reminder methods during maintenance; tests mock Frappe and email delivery.
